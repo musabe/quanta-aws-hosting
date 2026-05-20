@@ -1,0 +1,120 @@
+# .github/workflows/terraform-ci.yml
+
+name: Terraform CI
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+    paths:
+      - 'environments/**'
+      - 'modules/**'
+      - 'bootstrap/**'
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  TF_VERSION: "1.7.5"
+  AWS_REGION: "us-east-1"
+
+jobs:
+  terraform-fmt:
+    name: "Format Check"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive -diff
+
+  validate-solution-a-dev:
+    name: "Validate Solution A (dev)"
+    runs-on: ubuntu-latest
+    needs: terraform-fmt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: Configure AWS Credentials (dev)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEV }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-CI-${{ github.run_id }}
+      - name: Terraform Init
+        working-directory: environments/dev/solution-a
+        run: terraform init -backend=false
+      - name: Terraform Validate
+        working-directory: environments/dev/solution-a
+        run: terraform validate
+
+  validate-solution-b-dev:
+    name: "Validate Solution B (dev)"
+    runs-on: ubuntu-latest
+    needs: terraform-fmt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: Configure AWS Credentials (dev)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEV }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-CI-${{ github.run_id }}
+      - name: Terraform Init
+        working-directory: environments/dev/solution-b
+        run: terraform init -backend=false
+      - name: Terraform Validate
+        working-directory: environments/dev/solution-b
+        run: terraform validate
+
+  plan-solution-a-dev:
+    name: "Plan Solution A (dev)"
+    runs-on: ubuntu-latest
+    needs: validate-solution-a-dev
+    if: github.base_ref == 'develop'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: true
+      - name: Configure AWS Credentials (dev)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEV }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-Plan-${{ github.run_id }}
+      - name: Terraform Init
+        working-directory: environments/dev/solution-a
+        run: terraform init
+      - name: Terraform Plan
+        id: plan
+        working-directory: environments/dev/solution-a
+        run: terraform plan -no-color 2>&1 | tee plan_output.txt
+        continue-on-error: true
+      - name: Post Plan to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('environments/dev/solution-a/plan_output.txt', 'utf8');
+            const truncated = plan.length > 60000 ? plan.substring(0, 60000) + '\n\n... [truncated]' : plan;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## Terraform Plan — Solution A (dev)\n\n<details><summary>Show Plan</summary>\n\n\`\`\`terraform\n${truncated}\n\`\`\`\n\n</details>\n\nPlan status: \`${{ steps.plan.outcome }}\``
+            });
+      - name: Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1

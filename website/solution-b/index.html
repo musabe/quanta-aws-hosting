@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AWS Website Hosting — Solution B</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0d1117; color: #e6edf3;
+            min-height: 100vh; display: flex; align-items: center; justify-content: center;
+        }
+        .container { max-width: 800px; padding: 40px 24px; text-align: center; }
+        .badge {
+            display: inline-block; background: #1f6feb; color: #fff;
+            padding: 4px 12px; border-radius: 20px; font-size: 0.85rem; margin-bottom: 24px;
+        }
+        h1 {
+            font-size: 2.5rem; margin-bottom: 16px;
+            background: linear-gradient(135deg, #f79000, #ffc800);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+        }
+        .subtitle { color: #8b949e; font-size: 1.1rem; margin-bottom: 40px; }
+        .cards {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px; margin-bottom: 40px;
+        }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; }
+        .card h3 { color: #f79000; margin-bottom: 8px; font-size: 0.95rem; }
+        .card p  { color: #8b949e; font-size: 0.85rem; }
+        .footer { color: #6e7681; font-size: 0.8rem; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="badge">✅ Deployed via GitHub Actions + Terraform</div>
+        <h1>AWS Website Hosting</h1>
+        <p class="subtitle">Solution B — EC2 + Nginx + ALB + ACM + Route53</p>
+        <div class="cards">
+            <div class="card"><h3>🖥️ EC2</h3><p>Amazon Linux 2023, IMDSv2</p></div>
+            <div class="card"><h3>🔀 ALB</h3><p>TLS termination, HTTP→HTTPS</p></div>
+            <div class="card"><h3>🌐 Nginx</h3><p>Static file serving, gzip</p></div>
+            <div class="card"><h3>🔒 ACM</h3><p>Managed TLS certificate</p></div>
+            <div class="card"><h3>🛡️ VPC</h3><p>Private subnets, security groups</p></div>
+            <div class="card"><h3>🔁 SSM</h3><p>No SSH — secure management</p></div>
+        </div>
+        <p class="footer">Deployed: <span id="ts"></span></p>
+    </div>
+    <script>document.getElementById('ts').textContent = new Date().toUTCString();</script>
+</body>
+</html>

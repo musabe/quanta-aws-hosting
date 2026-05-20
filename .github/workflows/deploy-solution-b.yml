@@ -1,0 +1,148 @@
+# .github/workflows/deploy-solution-b.yml
+
+name: Deploy Solution B — EC2 + Nginx
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+    paths:
+      - 'environments/*/solution-b/**'
+      - 'modules/ec2-nginx/**'
+      - 'modules/vpc/**'
+      - 'modules/acm/**'
+      - 'modules/route53/**'
+      - 'website/solution-b/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'dev'
+        type: choice
+        options: [dev, prod]
+      deploy_type:
+        description: 'Deploy type'
+        required: true
+        default: 'all'
+        type: choice
+        options: [all, content-only]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_VERSION: "1.7.5"
+  AWS_REGION: "us-east-1"
+
+jobs:
+  setup:
+    name: "Setup"
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      deploy_type: ${{ steps.set-env.outputs.deploy_type }}
+    steps:
+      - name: Set environment
+        id: set-env
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+            echo "deploy_type=${{ github.event.inputs.deploy_type }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "environment=prod" >> $GITHUB_OUTPUT
+            echo "deploy_type=all" >> $GITHUB_OUTPUT
+          else
+            echo "environment=dev" >> $GITHUB_OUTPUT
+            echo "deploy_type=all" >> $GITHUB_OUTPUT
+          fi
+
+  terraform-deploy:
+    name: "Terraform Deploy"
+    runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.deploy_type == 'all'
+    environment:
+      name: ${{ needs.setup.outputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ needs.setup.outputs.environment == 'prod' && secrets.AWS_ROLE_ARN_PROD || secrets.AWS_ROLE_ARN_DEV }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-SolB-${{ github.run_id }}
+      - name: Terraform Init
+        working-directory: environments/${{ needs.setup.outputs.environment }}/solution-b
+        run: terraform init -reconfigure
+      - name: Terraform Validate
+        working-directory: environments/${{ needs.setup.outputs.environment }}/solution-b
+        run: terraform validate
+      - name: Terraform Plan
+        working-directory: environments/${{ needs.setup.outputs.environment }}/solution-b
+        run: terraform plan -out=tfplan -no-color
+      - name: Terraform Apply
+        working-directory: environments/${{ needs.setup.outputs.environment }}/solution-b
+        run: terraform apply -auto-approve tfplan
+
+  redeploy-content:
+    name: "Redeploy Content to EC2"
+    runs-on: ubuntu-latest
+    needs: [setup, terraform-deploy]
+    if: always() && (needs.terraform-deploy.result == 'success' || needs.terraform-deploy.result == 'skipped')
+    environment:
+      name: ${{ needs.setup.outputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ needs.setup.outputs.environment == 'prod' && secrets.AWS_ROLE_ARN_PROD || secrets.AWS_ROLE_ARN_DEV }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-Redeploy-${{ github.run_id }}
+      - name: Get Terraform Outputs
+        id: tf-outputs
+        working-directory: environments/${{ needs.setup.outputs.environment }}/solution-b
+        run: |
+          terraform init -reconfigure > /dev/null 2>&1
+          echo "instance_id=$(terraform output -raw instance_id)" >> $GITHUB_OUTPUT
+          BUCKET=$([[ "${{ needs.setup.outputs.environment }}" == "prod" ]] && \
+            echo "quanta-aws-hosting-content-prod-390951754623" || \
+            echo "quanta-aws-hosting-content-dev-858371255598")
+          echo "content_bucket=${BUCKET}" >> $GITHUB_OUTPUT
+      - name: Sync Content to S3
+        run: |
+          aws s3 sync website/solution-b/ \
+            s3://${{ steps.tf-outputs.outputs.content_bucket }}/solution-b/ \
+            --delete --region ${{ env.AWS_REGION }}
+      - name: Redeploy on EC2 via SSM
+        id: ssm
+        run: |
+          BUCKET=${{ steps.tf-outputs.outputs.content_bucket }}
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "${{ steps.tf-outputs.outputs.instance_id }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[
+              'aws s3 sync s3://${BUCKET}/solution-b/ /var/www/html/ --delete --region ${{ env.AWS_REGION }}',
+              'chown -R nginx:nginx /var/www/html',
+              'nginx -t && systemctl reload nginx',
+              'echo Redeploy complete'
+            ]" \
+            --query 'Command.CommandId' --output text)
+          echo "command_id=${COMMAND_ID}" >> $GITHUB_OUTPUT
+      - name: Wait for SSM Command
+        run: |
+          aws ssm wait command-executed \
+            --command-id "${{ steps.ssm.outputs.command_id }}" \
+            --instance-id "${{ steps.tf-outputs.outputs.instance_id }}"
+          echo "✅ Content redeployed to EC2"
