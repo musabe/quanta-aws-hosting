@@ -166,6 +166,7 @@ resource "aws_instance" "web" {
     encrypted             = true
   }
 
+  user_data_replace_on_change = true
   user_data = base64encode(templatefile("${path.module}/templates/user_data.sh", {
     content_s3_bucket = var.content_s3_bucket
     aws_region        = var.aws_region

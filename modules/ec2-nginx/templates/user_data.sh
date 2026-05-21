@@ -1,7 +1,6 @@
 #!/bin/bash
 # modules/ec2-nginx/templates/user_data.sh
 # Bootstraps EC2 instance with Nginx and pulls website content from S3.
-# Runs once at instance creation. For redeployment, CI/CD uses SSM Run Command.
 
 set -euo pipefail
 exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
@@ -17,7 +16,7 @@ dnf install -y nginx amazon-cloudwatch-agent
 # ─────────────────────────────────────────────
 # Nginx configuration
 # ─────────────────────────────────────────────
-cat > /etc/nginx/conf.d/${project_name}.conf << 'NGINX_EOF'
+cat > /etc/nginx/conf.d/quanta.conf << 'NGINX'
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
@@ -27,30 +26,25 @@ server {
 
     server_name _;
 
-    # Health check endpoint for ALB
     location /health {
         access_log off;
-        return 200 "healthy\n";
+        return 200 "healthy";
         add_header Content-Type text/plain;
     }
 
-    # Serve static files; fallback to index.html for SPA routing
     location / {
         try_files $uri $uri/ /index.html;
     }
 
-    # Security headers
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
-    # Gzip compression
     gzip on;
     gzip_types text/plain text/css application/json application/javascript text/xml;
     gzip_min_length 256;
 }
-NGINX_EOF
+NGINX
 
 # Remove default Nginx config
 rm -f /etc/nginx/conf.d/default.conf
@@ -74,13 +68,14 @@ chmod -R 755 /var/www/html
 # ─────────────────────────────────────────────
 # Enable and start Nginx
 # ─────────────────────────────────────────────
+nginx -t
 systemctl enable nginx
 systemctl start nginx
 
 # ─────────────────────────────────────────────
 # CloudWatch Agent configuration
 # ─────────────────────────────────────────────
-cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'CW_EOF'
+cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'CW'
 {
   "logs": {
     "logs_collected": {
@@ -101,7 +96,7 @@ cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'CW_E
     }
   }
 }
-CW_EOF
+CW
 
 /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
   -a fetch-config \
