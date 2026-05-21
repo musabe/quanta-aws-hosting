@@ -142,86 +142,50 @@ Together, the two solutions cover the full spectrum from serverless-static to tr
 
 ## Solution A — S3 + CloudFront Architecture
 
-```
-                         ┌─────────────────────────────────────────────┐
-                         │               AWS Cloud                      │
-  User Browser           │                                              │
-      │                  │  ┌─────────────┐      ┌──────────────────┐  │
-      │  HTTPS           │  │  Route53    │      │   ACM (us-east-1)│  │
-      ├─────────────────►│  │  A Record   │      │   TLS Cert       │  │
-      │  example.com     │  │  (ALIAS)    │      └──────────────────┘  │
-      │                  │  └──────┬──────┘               │            │
-      │                  │         │                       │            │
-      │                  │  ┌──────▼──────────────────────▼──────────┐ │
-      │                  │  │         CloudFront Distribution        │ │
-      │                  │  │  - HTTPS Only (redirect HTTP→HTTPS)    │ │
-      │                  │  │  - TLS 1.2 minimum                     │ │
-      │                  │  │  - OAC Origin Access Control           │ │
-      │                  │  │  - Caching (TTL 86400s default)        │ │
-      │                  │  │  - Geo-restriction optional            │ │
-      │                  │  └──────────────┬─────────────────────────┘ │
-      │                  │                 │ HTTPS (OAC signed request) │
-      │                  │  ┌──────────────▼─────────────────────────┐ │
-      │                  │  │         S3 Bucket (Private)            │ │
-      │                  │  │  - Block all public access             │ │
-      │                  │  │  - Bucket policy: CloudFront OAC only  │ │
-      │                  │  │  - Versioning enabled                  │ │
-      │                  │  │  - Server-side encryption (AES-256)    │ │
-      │                  │  └────────────────────────────────────────┘ │
-      │                  │                                              │
-      │                  └─────────────────────────────────────────────┘
-      │
-      │   GitHub Actions CI/CD
-      │   ┌──────────────────────────────────────────┐
-      │   │  1. terraform fmt / validate / plan       │
-      │   │  2. aws s3 sync ./website s3://bucket     │
-      │   │  3. aws cloudfront create-invalidation    │
-      │   └──────────────────────────────────────────┘
-```
+![Solution A — S3 + CloudFront](images/SolutionA-S3-CloudFront.png)
+
+### Flow
+1. User browser makes HTTPS request to `quantaweb.dev`
+2. Route53 ALIAS record resolves to CloudFront distribution
+3. CloudFront validates TLS using ACM certificate (us-east-1)
+4. CloudFront checks edge cache — serves cached response if available
+5. On cache miss, CloudFront signs request via OAC and fetches from S3
+6. S3 returns object — CloudFront caches and serves to user
+7. HTTP requests are automatically redirected to HTTPS by CloudFront
+
+### CI/CD Flow
+1. `terraform fmt` / `validate` / `plan` on every PR
+2. `terraform apply` on merge to `main` or `develop`
+3. `aws s3 sync` uploads updated website files
+4. `aws cloudfront create-invalidation` purges edge caches
 
 ---
 
 ## Solution B — EC2 + Nginx + ALB Architecture
 
-```
-                         ┌──────────────────────────────────────────────────┐
-                         │                  AWS Cloud                        │
-  User Browser           │                                                    │
-      │                  │  ┌──────────┐    ┌──────────────────────────────┐ │
-      │  HTTPS           │  │ Route53  │    │   ACM Certificate             │ │
-      ├─────────────────►│  │ A Record │    │   (ALB listener)              │ │
-      │  example.com     │  │ (ALIAS)  │    └──────────────────────────────┘ │
-      │                  │  └────┬─────┘                │                    │
-      │                  │       │         VPC (10.0.0.0/16)                 │
-      │                  │  ┌────▼─────────────────────────────────────────┐ │
-      │                  │  │   Application Load Balancer (public subnets) │ │
-      │                  │  │   - HTTPS:443 → Target Group                 │ │
-      │                  │  │   - HTTP:80  → Redirect to HTTPS             │ │
-      │                  │  │   - Security Group: 0.0.0.0/0 → 443, 80     │ │
-      │                  │  └────────────────────┬─────────────────────────┘ │
-      │                  │                        │ HTTP:80 (internal)        │
-      │                  │  ┌─────────────────────▼─────────────────────────┐│
-      │                  │  │  Private Subnet                               ││
-      │                  │  │  ┌───────────────────────────────────────┐    ││
-      │                  │  │  │  EC2 Instance (t3.micro)              │    ││
-      │                  │  │  │  - Nginx serving /var/www/html        │    ││
-      │                  │  │  │  - IMDSv2 enforced                    │    ││
-      │                  │  │  │  - IAM role (SSM + S3 read)           │    ││
-      │                  │  │  │  - Security Group: ALB SG → 80        │    ││
-      │                  │  │  │  - No SSH port 22 exposed             │    ││
-      │                  │  │  └───────────────────────────────────────┘    ││
-      │                  │  └───────────────────────────────────────────────┘│
-      │                  │                                                    │
-      │                  │  Elastic IP attached to NAT Gateway (outbound)    │
-      │                  └────────────────────────────────────────────────── ┘
-```
+![Solution B — EC2 + Nginx + ALB](images/SolutionB-EC2-Nginx-ALB.png)
+
+### Flow
+1. User browser makes HTTPS request to `ec2.quantaweb.dev`
+2. Route53 ALIAS record resolves to ALB DNS name
+3. ALB terminates TLS using ACM certificate
+4. ALB forwards HTTP:80 traffic to EC2 target group (private subnet)
+5. EC2 security group only accepts traffic from ALB security group
+6. Nginx serves static content from `/var/www/html`
+7. HTTP:80 requests to ALB are redirected to HTTPS:443
+
+### CI/CD Flow
+1. `terraform apply` creates/updates infrastructure
+2. GitHub Actions syncs content to S3 content bucket
+3. SSM Run Command triggers `aws s3 sync` on EC2
+4. Nginx reloads to serve updated content
 
 ---
 
 ## Key Architecture Decisions
 
 ### Why OAC over OAI (Origin Access Identity)?
-OAI is deprecated by AWS. OAC (Origin Access Control) is the current recommended pattern. It supports SSE-KMS buckets and provides stronger signing.
+OAI is deprecated by AWS. OAC (Origin Access Control) is the current recommended pattern. It supports SSE-KMS buckets and provides stronger signing with the distribution ARN pinned in the bucket policy.
 
 ### Why ALB over direct EC2 TLS?
 - ALB handles TLS termination via ACM — no certificate management on instances
@@ -230,7 +194,13 @@ OAI is deprecated by AWS. OAC (Origin Access Control) is the current recommended
 - Separates the "stable endpoint" from the "compute layer"
 
 ### Why us-east-1 for ACM?
-CloudFront requires ACM certificates in `us-east-1`. This is an AWS constraint. The Route53 hosted zone can be in any region (it's global).
+CloudFront requires ACM certificates in `us-east-1`. This is an AWS hard constraint. The Route53 hosted zone is global and unaffected by region.
 
 ### Why GitHub OIDC over static credentials?
-Long-lived AWS access keys stored in GitHub Secrets are a security liability. GitHub OIDC tokens are short-lived, scoped to a specific repository and branch, and automatically rotated. This is the AWS-recommended pattern for CI/CD.
+Long-lived AWS access keys stored in GitHub Secrets are a security liability. GitHub OIDC tokens are short-lived (15 minutes), scoped to a specific repository and branch, and automatically rotated. This is the AWS-recommended pattern for CI/CD.
+
+### Why ALIAS records over CNAME?
+CNAME records cannot be used at the zone apex (`quantaweb.dev`). ALIAS records work at apex, resolve faster, and have no extra DNS query charge.
+
+### Why separate dev/prod AWS accounts?
+Blast radius containment — a `terraform destroy` in dev cannot touch prod. Separate billing visibility and IAM boundaries match how mature engineering teams operate.
