@@ -12,7 +12,7 @@ echo "=== Starting bootstrap: $(date) ==="
 # System updates
 # ─────────────────────────────────────────────
 dnf update -y
-dnf install -y nginx aws-cli-2 amazon-cloudwatch-agent
+dnf install -y nginx amazon-cloudwatch-agent
 
 # ─────────────────────────────────────────────
 # Nginx configuration
