@@ -68,25 +68,36 @@ jobs:
       name: ${{ needs.setup.outputs.environment }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ needs.setup.outputs.environment == 'prod' && secrets.AWS_ROLE_ARN_PROD || secrets.AWS_ROLE_ARN_DEV }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GitHubActions-SolB-${{ github.run_id }}
+
       - name: Terraform Init
         working-directory: environments/${{ needs.setup.outputs.environment }}/solution-b
-        run: terraform init -reconfigure
+        run: |
+          terraform init -reconfigure \
+            -backend-config="profile=" \
+            -backend-config="access_key=$AWS_ACCESS_KEY_ID" \
+            -backend-config="secret_key=$AWS_SECRET_ACCESS_KEY" \
+            -backend-config="token=$AWS_SESSION_TOKEN"
+
       - name: Terraform Validate
         working-directory: environments/${{ needs.setup.outputs.environment }}/solution-b
         run: terraform validate
+
       - name: Terraform Plan
         working-directory: environments/${{ needs.setup.outputs.environment }}/solution-b
         run: terraform plan -out=tfplan -no-color
+
       - name: Terraform Apply
         working-directory: environments/${{ needs.setup.outputs.environment }}/solution-b
         run: terraform apply -auto-approve tfplan
@@ -100,31 +111,44 @@ jobs:
       name: ${{ needs.setup.outputs.environment }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ needs.setup.outputs.environment == 'prod' && secrets.AWS_ROLE_ARN_PROD || secrets.AWS_ROLE_ARN_DEV }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GitHubActions-Redeploy-${{ github.run_id }}
+
+      - name: Terraform Init
+        working-directory: environments/${{ needs.setup.outputs.environment }}/solution-b
+        run: |
+          terraform init -reconfigure \
+            -backend-config="profile=" \
+            -backend-config="access_key=$AWS_ACCESS_KEY_ID" \
+            -backend-config="secret_key=$AWS_SECRET_ACCESS_KEY" \
+            -backend-config="token=$AWS_SESSION_TOKEN"
+
       - name: Get Terraform Outputs
         id: tf-outputs
         working-directory: environments/${{ needs.setup.outputs.environment }}/solution-b
         run: |
-          terraform init -reconfigure > /dev/null 2>&1
           echo "instance_id=$(terraform output -raw instance_id)" >> $GITHUB_OUTPUT
           BUCKET=$([[ "${{ needs.setup.outputs.environment }}" == "prod" ]] && \
             echo "quanta-aws-hosting-content-prod-390951754623" || \
             echo "quanta-aws-hosting-content-dev-858371255598")
           echo "content_bucket=${BUCKET}" >> $GITHUB_OUTPUT
+
       - name: Sync Content to S3
         run: |
           aws s3 sync website/solution-b/ \
             s3://${{ steps.tf-outputs.outputs.content_bucket }}/solution-b/ \
             --delete --region ${{ env.AWS_REGION }}
+
       - name: Redeploy on EC2 via SSM
         id: ssm
         run: |
@@ -140,6 +164,7 @@ jobs:
             ]" \
             --query 'Command.CommandId' --output text)
           echo "command_id=${COMMAND_ID}" >> $GITHUB_OUTPUT
+
       - name: Wait for SSM Command
         run: |
           aws ssm wait command-executed \

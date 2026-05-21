@@ -56,25 +56,36 @@ jobs:
       name: ${{ needs.setup.outputs.environment }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ needs.setup.outputs.environment == 'prod' && secrets.AWS_ROLE_ARN_PROD || secrets.AWS_ROLE_ARN_DEV }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GitHubActions-SolA-${{ github.run_id }}
+
       - name: Terraform Init
         working-directory: environments/${{ needs.setup.outputs.environment }}/solution-a
-        run: terraform init -reconfigure
+        run: |
+          terraform init -reconfigure \
+            -backend-config="profile=" \
+            -backend-config="access_key=$AWS_ACCESS_KEY_ID" \
+            -backend-config="secret_key=$AWS_SECRET_ACCESS_KEY" \
+            -backend-config="token=$AWS_SESSION_TOKEN"
+
       - name: Terraform Validate
         working-directory: environments/${{ needs.setup.outputs.environment }}/solution-a
         run: terraform validate
+
       - name: Terraform Plan
         working-directory: environments/${{ needs.setup.outputs.environment }}/solution-a
         run: terraform plan -out=tfplan -no-color
+
       - name: Terraform Apply
         working-directory: environments/${{ needs.setup.outputs.environment }}/solution-a
         run: terraform apply -auto-approve tfplan
@@ -87,23 +98,35 @@ jobs:
       name: ${{ needs.setup.outputs.environment }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ needs.setup.outputs.environment == 'prod' && secrets.AWS_ROLE_ARN_PROD || secrets.AWS_ROLE_ARN_DEV }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GitHubActions-Sync-${{ github.run_id }}
+
+      - name: Terraform Init
+        working-directory: environments/${{ needs.setup.outputs.environment }}/solution-a
+        run: |
+          terraform init -reconfigure \
+            -backend-config="profile=" \
+            -backend-config="access_key=$AWS_ACCESS_KEY_ID" \
+            -backend-config="secret_key=$AWS_SECRET_ACCESS_KEY" \
+            -backend-config="token=$AWS_SESSION_TOKEN"
+
       - name: Get Terraform Outputs
         id: tf-outputs
         working-directory: environments/${{ needs.setup.outputs.environment }}/solution-a
         run: |
-          terraform init -reconfigure > /dev/null 2>&1
           echo "bucket_id=$(terraform output -raw bucket_id)" >> $GITHUB_OUTPUT
           echo "distribution_id=$(terraform output -raw distribution_id)" >> $GITHUB_OUTPUT
+
       - name: Sync assets to S3 (long cache)
         run: |
           aws s3 sync website/solution-a/ s3://${{ steps.tf-outputs.outputs.bucket_id }}/ \
@@ -111,6 +134,7 @@ jobs:
             --cache-control "max-age=86400" \
             --exclude "*.html" \
             --region ${{ env.AWS_REGION }}
+
       - name: Sync HTML to S3 (short cache)
         run: |
           aws s3 sync website/solution-a/ s3://${{ steps.tf-outputs.outputs.bucket_id }}/ \
@@ -118,6 +142,7 @@ jobs:
             --cache-control "max-age=300, must-revalidate" \
             --include "*.html" \
             --region ${{ env.AWS_REGION }}
+
       - name: Invalidate CloudFront Cache
         run: |
           INVALIDATION_ID=$(aws cloudfront create-invalidation \
@@ -130,6 +155,7 @@ jobs:
             --distribution-id ${{ steps.tf-outputs.outputs.distribution_id }} \
             --id ${INVALIDATION_ID}
           echo "✅ Cache invalidated"
+
       - name: Verify Site
         run: |
           ENV="${{ needs.setup.outputs.environment }}"
