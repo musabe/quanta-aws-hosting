@@ -18,7 +18,7 @@ provider "aws" {
 
   default_tags {
     tags = {
-      ManagedBy  = "Terraform"
+      ManagedBy   = "Terraform"
       Environment = var.environment
       Project     = "quanta-aws-hosting"
       Bootstrap   = "true"
@@ -74,7 +74,7 @@ resource "aws_s3_bucket_policy" "terraform_state" {
       Effect    = "Deny"
       Principal = "*"
       Action    = "s3:*"
-      Resource  = [
+      Resource = [
         aws_s3_bucket.terraform_state.arn,
         "${aws_s3_bucket.terraform_state.arn}/*"
       ]
@@ -144,66 +144,82 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "S3Management"
-        Effect = "Allow"
-        Action = ["s3:*"]
+        Sid      = "S3Management"
+        Effect   = "Allow"
+        Action   = ["s3:*"]
         Resource = "*"
       },
       {
-        Sid    = "CloudFrontManagement"
-        Effect = "Allow"
-        Action = ["cloudfront:*"]
+        Sid      = "CloudFrontManagement"
+        Effect   = "Allow"
+        Action   = ["cloudfront:*"]
         Resource = "*"
       },
       {
-        Sid    = "ACMManagement"
-        Effect = "Allow"
-        Action = ["acm:*"]
+        Sid      = "ACMManagement"
+        Effect   = "Allow"
+        Action   = ["acm:*"]
         Resource = "*"
       },
       {
-        Sid    = "Route53Management"
-        Effect = "Allow"
-        Action = ["route53:*"]
+        Sid      = "Route53Management"
+        Effect   = "Allow"
+        Action   = ["route53:*"]
         Resource = "*"
       },
       {
-        Sid    = "EC2Management"
-        Effect = "Allow"
-        Action = ["ec2:*"]
+        Sid      = "EC2Management"
+        Effect   = "Allow"
+        Action   = ["ec2:*"]
         Resource = "*"
       },
       {
         Sid    = "IAMManagement"
         Effect = "Allow"
         Action = [
-          "iam:GetRole", "iam:CreateRole", "iam:DeleteRole",
-          "iam:AttachRolePolicy", "iam:DetachRolePolicy",
-          "iam:PutRolePolicy", "iam:DeleteRolePolicy",
-          "iam:GetRolePolicy", "iam:PassRole", "iam:TagRole",
-          "iam:ListRolePolicies", "iam:ListAttachedRolePolicies",
-          "iam:CreateInstanceProfile", "iam:DeleteInstanceProfile",
-          "iam:AddRoleToInstanceProfile", "iam:RemoveRoleFromInstanceProfile",
-          "iam:GetInstanceProfile"
+          "iam:GetRole",
+          "iam:CreateRole",
+          "iam:DeleteRole",
+          "iam:AttachRolePolicy",
+          "iam:DetachRolePolicy",
+          "iam:PutRolePolicy",
+          "iam:DeleteRolePolicy",
+          "iam:GetRolePolicy",
+          "iam:PassRole",
+          "iam:TagRole",
+          "iam:ListRolePolicies",
+          "iam:ListAttachedRolePolicies",
+          "iam:CreateInstanceProfile",
+          "iam:DeleteInstanceProfile",
+          "iam:AddRoleToInstanceProfile",
+          "iam:RemoveRoleFromInstanceProfile",
+          "iam:GetInstanceProfile",
+          "iam:TagInstanceProfile",
+          "iam:CreateServiceLinkedRole"
         ]
         Resource = "*"
       },
       {
-        Sid    = "SSMManagement"
-        Effect = "Allow"
-        Action = ["ssm:*"]
+        Sid      = "SSMManagement"
+        Effect   = "Allow"
+        Action   = ["ssm:*"]
         Resource = "*"
       },
       {
-        Sid    = "ELBManagement"
-        Effect = "Allow"
-        Action = ["elasticloadbalancing:*"]
+        Sid      = "ELBManagement"
+        Effect   = "Allow"
+        Action   = ["elasticloadbalancing:*"]
         Resource = "*"
       },
       {
         Sid    = "TerraformState"
         Effect = "Allow"
-        Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ]
         Resource = [
           "arn:aws:s3:::quanta-aws-hosting-tfstate-${var.environment}-${data.aws_caller_identity.current.account_id}",
           "arn:aws:s3:::quanta-aws-hosting-tfstate-${var.environment}-${data.aws_caller_identity.current.account_id}/*"
@@ -212,7 +228,11 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
       {
         Sid    = "TerraformLock"
         Effect = "Allow"
-        Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"]
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:DeleteItem"
+        ]
         Resource = "arn:aws:dynamodb:*:*:table/quanta-aws-hosting-tflock-${var.environment}"
       }
     ]
