@@ -1,171 +1,146 @@
 # Deployment Guide
 
-## Prerequisites
+This document covers the full deployment lifecycle — prerequisites, bootstrap, environment deployment, CI/CD workflow, rollback procedures, and DNS validation. It is intended as an operational reference for anyone deploying or maintaining this infrastructure.
+
+---
+
+## 🚀 Prerequisites
+
+Install the required tooling on Windows:
 
 ```powershell
-# 1. Install tools
 winget install HashiCorp.Terraform
 winget install Amazon.AWSCLI
 winget install Git.Git
+```
 
-# 2. Verify
-terraform --version  # must be >= 1.7.0
-aws --version        # must be >= 2.0.0
+Verify versions:
+
+```powershell
+terraform --version   # >= 1.7.0
+aws --version         # >= 2.0.0
 git --version
 ```
 
-## Step 1 — AWS Account Setup
+---
 
-You need:
-- A dev AWS account
-- A prod AWS account
-- An IAM user in each with `AdministratorAccess` (for initial bootstrap only)
-- A Route53 hosted zone in one of the accounts (typically prod)
+## ☁️ AWS Account Setup
+
+This project requires two AWS accounts — one for dev, one for prod. Using separate accounts provides blast radius containment and independent billing visibility.
+
+Create an IAM admin user in each account for initial bootstrap:
 
 ```powershell
-# Configure profiles
-aws configure --profile dev
-aws configure --profile prod
+# Configure AWS CLI profiles
+aws configure --profile quanta-web-dev
+aws configure --profile quanta-web-prod
 
-# Verify
-aws sts get-caller-identity --profile dev
-aws sts get-caller-identity --profile prod
+# Verify both profiles
+aws sts get-caller-identity --profile quanta-web-dev
+aws sts get-caller-identity --profile quanta-web-prod
 ```
 
-## Step 2 — Route53 Hosted Zone
+> [!NOTE]
+> `AdministratorAccess` is required only for the initial bootstrap step. Ongoing deployments use scoped GitHub Actions OIDC roles created during bootstrap.
 
-If you don't have one:
+---
 
-```powershell
-# Create hosted zone
-aws route53 create-hosted-zone \
-  --name example.com \
-  --caller-reference "$(Get-Date -Format 'yyyyMMddHHmmss')" \
-  --profile prod
+## 🏗️ Bootstrap Remote State
 
-# Note the NS records and update them at your domain registrar
-```
+Bootstrap creates the S3 state bucket, DynamoDB lock table, GitHub OIDC provider, and IAM deployment role in each account. It uses local state and is run once per account by a human operator.
 
-## Step 3 — Bootstrap Remote State
-
-Run once per AWS account:
+Separate backend state per environment reduces blast radius — a state corruption or accidental destroy in dev cannot affect prod.
 
 ```powershell
-# Dev account
 cd bootstrap
+
+# Bootstrap dev account
 terraform init
+terraform apply -var="environment=dev" -var="aws_profile=quanta-web-dev" -auto-approve
 
-terraform apply `
-  -var="environment=dev" `
-  -var="aws_profile=dev" `
-  -var="github_org=YOUR_GITHUB_ORG" `
-  -var="github_repo=aws-website-hosting"
+# Clear local state between accounts
+Remove-Item -Force terraform.tfstate -ErrorAction SilentlyContinue
+Remove-Item -Force terraform.tfstate.backup -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force .terraform -ErrorAction SilentlyContinue
 
-# Note the outputs — you need them for backend.tf files and GitHub secrets
-terraform output
-
-# Prod account
-terraform apply `
-  -var="environment=prod" `
-  -var="aws_profile=prod" `
-  -var="github_org=YOUR_GITHUB_ORG" `
-  -var="github_repo=aws-website-hosting"
-
-terraform output
+# Bootstrap prod account
+terraform init
+terraform apply -var="environment=prod" -var="aws_profile=quanta-web-prod" -auto-approve
 ```
 
-## Step 4 — Update Backend Configs
+Note the outputs from each run — the `github_actions_role_arn` values are needed for GitHub Secrets.
 
-Replace placeholder values in each `backend.tf` with bootstrap outputs:
+---
+
+## 🔑 GitHub Secrets and Environments
+
+Add the OIDC role ARNs to GitHub repository secrets:
+
+**Settings → Secrets and variables → Actions → New repository secret**
+
+| Secret | Value |
+|--------|-------|
+| `AWS_ROLE_ARN_DEV` | `github_actions_role_arn` from dev bootstrap |
+| `AWS_ROLE_ARN_PROD` | `github_actions_role_arn` from prod bootstrap |
+
+Create two GitHub Environments (**Settings → Environments**):
+
+- `dev` — no restrictions, deploys automatically on push to `develop`
+- `prod` — add yourself as a required reviewer to create a manual approval gate
+
+> [!IMPORTANT]
+> GitHub Environment Protection rules create the manual approval gate for production deployments. Without this, a push to `main` deploys immediately.
+
+---
+
+## 🌍 DNS Setup
+
+Register domains in Route53 or create hosted zones for existing domains:
 
 ```powershell
-# Example: environments/dev/solution-a/backend.tf
-# Replace: aws-website-hosting-tfstate-dev-XXXXXXXXXXXX
-# With:    output "state_bucket_name" from bootstrap (e.g. aws-website-hosting-tfstate-dev-123456789012)
+# Create hosted zone for dev domain
+aws route53 create-hosted-zone `
+  --name quantadev.dev `
+  --caller-reference "$(Get-Date -Format 'yyyyMMddHHmmss')" `
+  --profile quanta-web-dev
 ```
 
-## Step 5 — Update tfvars
+Note the four NS records returned — update your domain registrar if the domain was registered externally.
 
-Edit each `terraform.tfvars` file:
+> [!NOTE]
+> ACM certificate DNS validation can take 5–30 minutes. CloudFront distributions propagate globally over 10–15 minutes. Plan deployments accordingly.
 
-```powershell
-# environments/dev/solution-a/terraform.tfvars
-domain_name      = "dev.yourdomain.com"
-hosted_zone_name = "yourdomain.com"
+---
 
-# environments/prod/solution-a/terraform.tfvars
-domain_name      = "yourdomain.com"
-hosted_zone_name = "yourdomain.com"
+## 🔄 Environment Deployment
 
-# environments/dev/solution-b/terraform.tfvars
-domain_name          = "ec2-dev.yourdomain.com"
-content_s3_bucket    = "your-content-bucket-name"
-```
-
-## Step 6 — GitHub Secrets Setup
-
-In your GitHub repository: **Settings → Secrets and variables → Actions**
-
-Add these secrets:
-
-| Secret Name | Value |
-|-------------|-------|
-| `AWS_ROLE_ARN_DEV` | ARN from bootstrap output `github_actions_role_arn` (dev account) |
-| `AWS_ROLE_ARN_PROD` | ARN from bootstrap output `github_actions_role_arn` (prod account) |
-| `CONTENT_BUCKET_DEV` | S3 bucket name for EC2 content (dev) |
-| `CONTENT_BUCKET_PROD` | S3 bucket name for EC2 content (prod) |
-
-## Step 7 — GitHub Environment Protection
-
-Create two GitHub Environments: **Settings → Environments**
-
-1. `dev` — no restrictions
-2. `prod` — add required reviewer (yourself)
-
-This creates the manual approval gate for production deployments.
-
-## Step 8 — Deploy Solution A (dev)
+Deploy Solution A (S3 + CloudFront) to dev:
 
 ```powershell
 cd environments/dev/solution-a
 
-# Initialize
 terraform init
-
-# Plan
 terraform plan -out=tfplan
-
-# Review the plan, then apply
 terraform apply tfplan
-
-# Verify outputs
 terraform output
 ```
 
-Expected outputs:
-```
-bucket_id                   = "aws-website-hosting-website-dev-123456789012"
-distribution_id             = "EXXXXXXXXXXXXX"
-distribution_domain_name    = "dxxxxxxxxx.cloudfront.net"
-```
-
-## Step 9 — Upload Website Content
+Upload website content and invalidate the cache:
 
 ```powershell
-# Sync local website files to S3
+# Sync website files to S3
 aws s3 sync website/solution-a/ `
-  s3://$(terraform -chdir=environments/dev/solution-a output -raw bucket_id)/ `
-  --profile dev
+  s3://$(terraform output -raw bucket_id)/ `
+  --profile quanta-web-dev
 
-# Invalidate CloudFront cache
-$DIST_ID = terraform -chdir=environments/dev/solution-a output -raw distribution_id
+# Invalidate CloudFront edge caches
 aws cloudfront create-invalidation `
-  --distribution-id $DIST_ID `
+  --distribution-id $(terraform output -raw distribution_id) `
   --paths "/*" `
-  --profile dev
+  --profile quanta-web-dev
 ```
 
-## Step 10 — Deploy Solution B (dev)
+Deploy Solution B (EC2 + Nginx) to dev:
 
 ```powershell
 cd environments/dev/solution-b
@@ -175,125 +150,94 @@ terraform plan -out=tfplan
 terraform apply tfplan
 ```
 
-## Step 11 — Verify Deployments
-
-```powershell
-# Solution A — check HTTPS
-curl -I https://dev.yourdomain.com
-
-# Solution B — check HTTPS
-curl -I https://ec2-dev.yourdomain.com
-
-# Check certificate
-# Windows
-$web = Invoke-WebRequest -Uri "https://dev.yourdomain.com" -UseBasicParsing
-$web.StatusCode  # should be 200
-```
-
-## Step 12 — Push to GitHub (triggers CI/CD)
-
-```powershell
-git add .
-git commit -m "feat: initial infrastructure deployment"
-git push origin develop
-# → GitHub Actions: deploys to dev
-
-git checkout main
-git merge develop
-git push origin main
-# → GitHub Actions: requests approval, then deploys to prod
-```
+The EC2 instance bootstraps automatically via `user_data` — Nginx installs and content syncs from S3 on first boot.
 
 ---
 
-## Rollback Procedures
+## 🔁 CI/CD Pipeline
 
-### Solution A (S3 + CloudFront)
+Pushes to `develop` deploy to dev automatically. Pushes to `main` trigger a manual approval gate before deploying to prod.
+
+```
+feature/* → PR → develop   →  deploy to dev   (automatic)
+develop   → PR → main      →  deploy to prod  (requires approval)
+```
+
+PRs trigger `terraform fmt -check`, `terraform validate`, and `terraform plan`. The plan output is posted as a PR comment for review.
+
+> [!WARNING]
+> Always review `terraform plan` output carefully before approving production deployments. Unexpected resource replacements (`-/+`) should be investigated before applying.
+
+---
+
+## 🔙 Rollback Procedures
+
+### Solution A — Content Rollback
+
+S3 versioning enables instant content rollback without redeployment:
 
 ```powershell
-# Rollback website content — restore previous S3 version
-$BUCKET = terraform -chdir=environments/prod/solution-a output -raw bucket_id
-
-# List versions of a specific file
-aws s3api list-object-versions --bucket $BUCKET --prefix "index.html"
+# List versions of a file
+aws s3api list-object-versions `
+  --bucket BUCKET_NAME `
+  --prefix "index.html"
 
 # Restore a previous version
 aws s3api copy-object `
-  --bucket $BUCKET `
-  --copy-source "$BUCKET/index.html?versionId=PREVIOUS_VERSION_ID" `
+  --bucket BUCKET_NAME `
+  --copy-source "BUCKET_NAME/index.html?versionId=PREVIOUS_VERSION_ID" `
   --key "index.html"
 
-# Invalidate cache
+# Invalidate cache after restore
 aws cloudfront create-invalidation `
-  --distribution-id $(terraform output -raw distribution_id) `
+  --distribution-id DIST_ID `
   --paths "/*"
 ```
 
-### Terraform State Rollback
+### Infrastructure Rollback
+
+Terraform state is versioned in S3. To roll back infrastructure:
 
 ```powershell
-# Terraform state is versioned in S3
-# List state versions
+# List state file versions
 aws s3api list-object-versions `
-  --bucket aws-website-hosting-tfstate-prod-XXXXXXXXXXXX `
+  --bucket quanta-aws-hosting-tfstate-prod-111111111111 `
   --prefix "prod/solution-a/terraform.tfstate"
 
-# To roll back: restore previous state version
-# Then run terraform apply to reconcile infrastructure
+# Restore a previous state version via the S3 console or CLI
+# Then run terraform apply to reconcile infrastructure to the restored state
 ```
+
+> [!WARNING]
+> `terraform destroy -auto-approve` should never be used in production without explicit change review.
 
 ---
 
-## DNS Propagation
+## 🌍 DNS Validation
 
-ACM certificate DNS validation can take **5–30 minutes**. Route53 ALIAS records propagate in **< 60 seconds** within AWS but may take **up to 48 hours** for external DNS TTL expiry.
+After deployment, verify DNS resolution:
 
 ```powershell
 # Check DNS propagation
-nslookup dev.yourdomain.com
-nslookup dev.yourdomain.com 8.8.8.8
+nslookup quantaweb.dev
+nslookup quantaweb.dev 8.8.8.8
 
-# Check certificate status
+# Check ACM certificate status
 aws acm describe-certificate `
-  --certificate-arn "arn:aws:acm:us-east-1:XXXX:certificate/YYYY" `
+  --certificate-arn "arn:aws:acm:us-east-1:111111111111:certificate/EXAMPLE" `
   --query 'Certificate.Status'
+
+# Verify HTTPS response
+curl -I https://quantaweb.dev
 ```
 
 ---
 
-## Complete Command Reference
+## 📋 Operational Recommendations
 
-```powershell
-# Format all Terraform files
-terraform fmt -recursive
-
-# Validate all environments
-Get-ChildItem -Path environments -Recurse -Filter "*.tf" | `
-  Select-Object -ExpandProperty DirectoryName | `
-  Sort-Object -Unique | `
-  ForEach-Object { Push-Location $_; terraform validate; Pop-Location }
-
-# Plan with variable file
-terraform plan -var-file="terraform.tfvars" -out=tfplan
-
-# Apply saved plan
-terraform apply tfplan
-
-# Destroy (with confirmation prompt)
-terraform destroy
-
-# Destroy without prompt (CAREFUL)
-terraform destroy -auto-approve
-
-# Show current state
-terraform show
-
-# List resources in state
-terraform state list
-
-# Import existing resource
-terraform import aws_s3_bucket.example my-bucket-name
-
-# Unlock state (if stuck)
-terraform force-unlock LOCK_ID
-```
+- Prefer CI/CD over manual `terraform apply` in production — pipeline runs are auditable
+- Review `terraform plan` output on every PR before merging
+- Isolate environments per AWS account to contain blast radius
+- Monitor ACM and CloudFront propagation timing after deployments
+- Use `terraform state list` and `terraform state show` to inspect state before destructive operations
+- Run `terraform fmt -recursive` before committing to avoid CI failures

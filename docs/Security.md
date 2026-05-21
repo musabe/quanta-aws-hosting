@@ -1,215 +1,204 @@
 # Security
 
-## Security Design Principles
-
-This project applies **defence in depth** — multiple independent security controls so that a failure in any single layer does not compromise the whole system.
+This document describes the security controls implemented across the quanta-aws-hosting project. The design applies defence in depth — multiple independent controls across IAM, network, data, and operational layers — so that a failure in any single control does not compromise the overall system.
 
 ---
 
-## 1. IAM Strategy — Least Privilege
+## 🔐 IAM Strategy
 
-### GitHub Actions OIDC (No Static Credentials)
+### GitHub Actions OIDC Federation
 
-**Why OIDC over access keys:**
-- Access keys are long-lived — if leaked, they remain valid until manually rotated
-- OIDC tokens are short-lived (15 minutes) and scoped to a specific repo/branch
-- No secret to store, rotate, or accidentally commit
+> [!IMPORTANT]
+> No long-lived AWS credentials are stored anywhere in this repository or GitHub Secrets.
+
+GitHub Actions authenticates to AWS via OIDC federation using short-lived tokens:
 
 ```
 GitHub Actions job
     │ Requests OIDC token from GitHub
     ▼
-GitHub token.actions.githubusercontent.com
-    │ Returns signed JWT with claims:
-    │   sub: repo:ORG/REPO:ref:refs/heads/main
+token.actions.githubusercontent.com
+    │ Returns signed JWT:
+    │   sub: repo:musabe/quanta-aws-hosting:ref:refs/heads/main
     ▼
 AWS STS AssumeRoleWithWebIdentity
-    │ Validates JWT, checks trust policy conditions
+    │ Validates JWT signature and trust policy conditions
     ▼
-Temporary credentials (15min TTL)
+Temporary credentials (15-minute TTL)
 ```
 
-The IAM role trust policy restricts assumption to:
-- Your specific GitHub organisation and repository
-- Optionally: specific branch (`refs/heads/main`)
+The IAM role trust policy restricts assumption to the specific GitHub repository and optionally a specific branch. OIDC tokens expire automatically and cannot be reused.
+
+**Why it matters:** Long-lived access keys remain valid until manually rotated. A leaked OIDC token expires within 15 minutes and is scoped to a single workflow run.
+
+### Bootstrap vs Day-2 IAM
+
+`AdministratorAccess` is used only during the initial bootstrap step to create the remote state infrastructure and OIDC provider. All ongoing deployments use the scoped `quanta-aws-hosting-github-actions-{env}` IAM role with least-privilege permissions covering only the services required.
 
 ### EC2 Instance Profile
 
-The EC2 instance has an IAM role (not access keys) that grants:
-- `AmazonSSMManagedInstanceCore` — SSM Session Manager access
-- `CloudWatchAgentServerPolicy` — CloudWatch logs
-- Custom S3 read policy — scoped to content bucket only
+EC2 instances use an IAM instance role — no access keys are stored on disk. The role grants:
 
-**No EC2 instance has access keys stored on disk.**
+- `AmazonSSMManagedInstanceCore` — SSM Session Manager access
+- `CloudWatchAgentServerPolicy` — CloudWatch Logs shipping
+- Custom S3 read policy — scoped to the content bucket only
 
 ### Terraform State Bucket
 
-- Bucket policy enforces HTTPS only
-- State files encrypted at rest (AES-256)
-- Versioning enabled — accidental state deletion is recoverable
+- Bucket policy enforces HTTPS-only access
+- AES-256 server-side encryption at rest
+- Versioning enabled — accidental deletion is recoverable
 - DynamoDB table prevents concurrent state mutations
 
 ---
 
-## 2. S3 Security (Solution A)
+## ☁️ S3 Security (Solution A)
 
 | Control | Implementation |
 |---------|---------------|
 | Block public access | All four `block_public_*` settings enabled |
-| No public bucket ACL | `acl` argument not used |
-| OAC instead of OAI | `aws_cloudfront_origin_access_control` |
+| Public ACL | Not used — `acl` argument omitted |
+| Origin access | OAC (`aws_cloudfront_origin_access_control`) |
 | Encryption at rest | SSE-S3 (AES-256) |
-| Versioning | Enabled — allows content rollback |
-| HTTPS policy | Bucket policy denies non-HTTPS |
+| Versioning | Enabled — supports content rollback |
+| Transport security | Bucket policy denies non-HTTPS requests |
 
-### The OAC Bucket Policy Pattern
+### OAC Bucket Policy Pattern
+
+The bucket policy pins access to a specific CloudFront distribution ARN:
 
 ```json
 {
   "Principal": { "Service": "cloudfront.amazonaws.com" },
   "Condition": {
     "StringEquals": {
-      "AWS:SourceArn": "arn:aws:cloudfront::ACCOUNT:distribution/DIST_ID"
+      "AWS:SourceArn": "arn:aws:cloudfront::111111111111:distribution/EXAMPLE"
     }
   }
 }
 ```
 
-This is more restrictive than the legacy OAI pattern — it pins the permission to a specific distribution ID, not just any CloudFront distribution in the account.
+This is more restrictive than the legacy OAI pattern, which allowed any CloudFront distribution in the account to access the bucket.
 
 ---
 
-## 3. CloudFront Security (Solution A)
+## 🌐 CloudFront Security (Solution A)
 
-- `viewer_protocol_policy = "redirect-to-https"` — HTTP always redirected to HTTPS
-- `minimum_protocol_version = "TLSv1.2_2021"` — disables TLS 1.0 and 1.1
-- `ssl_support_method = "sni-only"` — SNI is the standard; avoids $600/month dedicated IP cost
-- Custom error pages — 403/404 serve controlled responses, not AWS defaults
+- `viewer_protocol_policy = "redirect-to-https"` — all HTTP traffic redirected to HTTPS
+- `minimum_protocol_version = "TLSv1.2_2021"` — TLS 1.0 and 1.1 disabled
+- `ssl_support_method = "sni-only"` — SNI-based TLS; avoids the $600/month dedicated IP option
+- Custom error responses — 403 and 404 return controlled pages, not raw AWS error responses
 
 ---
 
-## 4. EC2 Security (Solution B)
+## 🖥️ EC2 Security (Solution B)
 
-### Security Groups
+### Security Group Layering
 
 ```
 Internet
-    │ HTTPS/HTTP
+    │ HTTPS / HTTP
     ▼
-ALB Security Group     (allows 0.0.0.0/0 → 443, 80)
-    │ HTTP only
+ALB Security Group       (ingress: 0.0.0.0/0 → 443, 80)
+    │ HTTP:80 only
     ▼
-EC2 Security Group     (allows ALB SG → 80 only)
+EC2 Security Group       (ingress: ALB SG reference → 80)
     │
-    ▼ No inbound from internet
-EC2 Instance           (private subnet)
+    ▼ No direct inbound from internet
+EC2 Instance             (private subnet)
 ```
 
-EC2 has **no inbound rules from the internet**. All traffic flows through the ALB.
+EC2 accepts inbound traffic only from the ALB security group — not from any CIDR range. This ensures the ALB is the only path to the instance.
+
+**Why security group references over CIDR:** CIDR-based ingress rules are static and cannot track ALB IP changes. Security group references follow the ALB automatically.
 
 ### IMDSv2 Enforcement
 
-IMDSv2 (requiring a session token for metadata access) is enforced on all instances:
+All EC2 instances enforce IMDSv2:
 
 ```hcl
 metadata_options {
   http_endpoint               = "enabled"
-  http_tokens                 = "required"   # Forces IMDSv2
-  http_put_response_hop_limit = 1            # Prevents SSRF from containers
+  http_tokens                 = "required"
+  http_put_response_hop_limit = 1
 }
 ```
 
-Without IMDSv2, an SSRF vulnerability in a web application could steal instance credentials from `http://169.254.169.254`.
+**Why it matters:** Without IMDSv2, an SSRF vulnerability in a web application can fetch instance credentials from `http://169.254.169.254` with a simple HTTP request. IMDSv2 requires a session token that cannot be obtained via SSRF.
 
-### No SSH Port 22
+### No SSH Exposure
 
-Port 22 is **not opened** in any security group. Access is via:
-- **SSM Session Manager** — browser or CLI, fully audited, no key management
-- Requires `AmazonSSMManagedInstanceCore` IAM policy on instance role
+Port 22 is not opened in any security group. Management access uses SSM Session Manager:
 
 ```powershell
-# Start SSM session (no SSH needed)
-aws ssm start-session --target i-0abcdef1234567890 --profile dev
+aws ssm start-session --target i-EXAMPLE --profile quanta-web-prod
 ```
 
-### Encrypted Root Volume
+**Why it matters:** SSM requires no inbound firewall rule, produces a full audit trail in CloudTrail, and eliminates SSH key management entirely.
 
-All EC2 root volumes use `encrypted = true`. This protects data at rest if the underlying hardware is decommissioned.
+### Encrypted Root Volumes
 
----
+All EC2 root volumes use `encrypted = true` with gp3 storage. This protects data at rest if underlying hardware is decommissioned.
 
-## 5. TLS/HTTPS Configuration
+### ALB-to-EC2 Traffic
 
-### Solution A — CloudFront + ACM
-
-ACM certificates in `us-east-1` are used by CloudFront (AWS constraint). DNS validation is used — it auto-renews before expiry without requiring site availability.
-
-CloudFront enforces TLS 1.2 minimum with the `TLSv1.2_2021` security policy.
-
-### Solution B — ALB + ACM
-
-ALB uses `ELBSecurityPolicy-TLS13-1-2-2021-06` — the most current AWS managed TLS policy. This:
-- Prefers TLS 1.3
-- Falls back to TLS 1.2
-- Disables all cipher suites below TLS 1.2
-
-ALB terminates TLS. Traffic from ALB to EC2 is HTTP on port 80 (internal VPC only — acceptable since VPC traffic is isolated and not traversing the internet).
+ALB terminates TLS and forwards HTTP:80 to EC2 internally. This traffic remains inside the isolated VPC and does not traverse the public internet. Adding HTTPS between ALB and EC2 is possible if compliance requirements demand it, at the cost of certificate management on instances.
 
 ---
 
-## 6. Secrets Management
+## 🔑 Secrets Management
 
-### What is and isn't in version control
+### Version Control Policy
 
-| Item | In Git? | Why |
-|------|---------|-----|
+| Item | In Git? | Reason |
+|------|---------|--------|
 | Terraform code | ✅ Yes | Infrastructure as code |
-| `terraform.tfvars` | ✅ Yes | Non-sensitive config only |
-| AWS account IDs | ✅ Yes | Not sensitive — account IDs are visible in ARNs and billing |
-| AWS access keys | ❌ Never | Stored in GitHub Secrets only |
-| IAM role ARNs | GitHub Secrets | Rotated per environment |
+| `terraform.tfvars` | ✅ Yes | Non-sensitive configuration only |
+| AWS access keys | ❌ Never | Not used — OIDC only |
+| IAM role ARNs | GitHub Secrets | Per-environment, not committed |
 | SSH private keys | ❌ Never | Not used — SSM only |
 | `*.tfstate` files | ❌ Never | Contain sensitive resource metadata |
-| `*.tfplan` files | ❌ Never | Transient — not persisted |
+| `*.tfplan` files | ❌ Never | Transient — not persisted to Git |
 
-### `.gitignore` entries
+### `.gitignore` Entries
 
 ```gitignore
-# Terraform
 *.tfstate
 *.tfstate.backup
 *.tfplan
 .terraform/
-.terraform.lock.hcl    # Commit this — it pins provider versions
-override.tf
-override.tf.json
-*_override.tf
 crash.log
-
-# AWS
-.aws/credentials       # Never commit credentials
+.aws/credentials
 ```
 
 ---
 
-## 7. Recommendations for Hiring Manager Review
+## 🛡️ Threat Model Considerations
 
-These controls go beyond minimum viable security and signal senior-level thinking:
+| Threat | Mitigation |
+|--------|-----------|
+| Credential leakage | OIDC federation — no persistent credentials exist |
+| SSRF attacks on EC2 | IMDSv2 enforcement — session token required |
+| Direct EC2 access | Private subnets + no port 22 + SSM only |
+| S3 data exposure | Block public access + OAC + HTTPS-only bucket policy |
+| Dev/prod blast radius | Separate AWS accounts with independent IAM boundaries |
+| Concurrent state corruption | DynamoDB state locking |
+| Accidental state deletion | S3 versioning on state bucket |
 
-1. **GitHub OIDC** instead of stored access keys
-2. **OAC** instead of deprecated OAI for CloudFront
-3. **IMDSv2 enforcement** on every EC2 instance
-4. **SSM Session Manager** instead of port 22
-5. **State bucket policy** enforcing TLS
-6. **DynamoDB state locking** prevents concurrent corruption
-7. **ALB TLS 1.3 policy** — latest AWS managed security policy
-8. **Private subnets** for EC2 — traffic only via ALB
-9. **Separate state per environment** — blast radius containment
-10. **`prevent_destroy = true`** on state bucket — prevents accidental wipe
+---
 
-**Optional enhancements for extra credit:**
-- WAF on CloudFront (AWS Managed Rules — common web attack protection)
+## 🔒 Security Posture Summary
+
+This implementation demonstrates:
+
+- **Credential minimization** — no long-lived keys anywhere in the CI/CD pipeline
+- **Reduced attack surface** — private subnets, no SSH, no public S3 access
+- **Least privilege** — scoped IAM roles per environment and service
+- **Blast radius containment** — separate AWS accounts, separate state, separate IAM
+
+**Production enhancements worth adding:**
+- WAF with AWS Managed Rules on CloudFront
 - VPC Flow Logs to S3 or CloudWatch
+- AWS GuardDuty for threat detection
 - AWS Config rules for continuous compliance
-- GuardDuty for threat detection
-- AWS SecurityHub for centralised findings
+- AWS SecurityHub for centralised findings aggregation

@@ -3,24 +3,96 @@
 [![Terraform](https://img.shields.io/badge/Terraform-1.7+-7B42BC?logo=terraform)](https://terraform.io)
 [![AWS](https://img.shields.io/badge/AWS-Multi--Account-FF9900?logo=amazonaws)](https://aws.amazon.com)
 [![CI](https://github.com/musabe/quanta-aws-hosting/actions/workflows/terraform-ci.yml/badge.svg)](https://github.com/musabe/quanta-aws-hosting/actions)
+[![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
 
-Production-grade AWS website hosting — two architectures, two accounts, automated CI/CD.
+Production-grade AWS website hosting implemented with Terraform, across two AWS accounts, with automated GitHub Actions CI/CD, HTTPS, DNS, and security best practices. This repository exists as a production-oriented infrastructure reference demonstrating Terraform module design, multi-account AWS deployment, CI/CD automation, and modern security controls.
 
-## Environments
+---
+
+## 🏆 Highlights
+
+- Two AWS hosting architectures — serverless-static and traditional-compute
+- Multi-account Terraform deployment (dev / prod isolation)
+- GitHub Actions OIDC federation — no long-lived AWS credentials
+- CloudFront Origin Access Control (OAC) — replaces deprecated OAI
+- IMDSv2 enforced on all EC2 instances
+- SSM Session Manager — no SSH port 22 exposure
+- Terraform remote state with S3 backend and DynamoDB locking
+- Automated rollback via S3 versioning
+- PR-gated Terraform plans and manual approval gate for production
+
+---
+
+## 🌍 Environments
 
 | Environment | Account | Domain | Profile |
 |-------------|---------|--------|---------|
-| **prod** | `390951754623` | `quantaweb.dev` | `quanta-web-prod` |
-| **dev** | `858371255598` | `quantadev.dev` | `quanta-web-dev` |
+| **prod** | `111111111111` | `quantaweb.dev` | `quanta-web-prod` |
+| **dev** | `222222222222` | `quantadev.dev` | `quanta-web-dev` |
 
-## Solutions
+---
+
+## ☁️ Solutions
 
 | Solution | Architecture | Dev URL | Prod URL |
 |----------|-------------|---------|----------|
 | **A** | S3 + CloudFront + ACM + Route53 | `https://quantadev.dev` | `https://quantaweb.dev` |
 | **B** | EC2 + Nginx + ALB + ACM + Route53 | `https://ec2.quantadev.dev` | `https://ec2.quantaweb.dev` |
 
-## Quick Start
+### Solution A — S3 + CloudFront
+
+![Solution A Architecture](docs/images/SolutionA-S3-CloudFront.png)
+
+### Solution B — EC2 + Nginx + ALB
+
+![Solution B Architecture](docs/images/SolutionB-EC2-Nginx-ALB.png)
+
+> [!NOTE]
+> CloudFront ACM certificates must be created in `us-east-1` regardless of deployment region.
+
+---
+
+## 🏗️ Architecture Decisions
+
+**Solution A (S3 + CloudFront)** was selected for its near-zero operational overhead, global CDN delivery via 400+ edge locations, and serverless static hosting model. It demonstrates CloudFront OAC, ACM DNS validation, and S3 security hardening.
+
+**Solution B (EC2 + ALB + Nginx)** was selected to demonstrate VPC design, ALB TLS termination, IAM instance profiles, security group layering, and traditional compute hosting patterns.
+
+Together, the two solutions intentionally cover the full spectrum from serverless-static to traditional-compute deployment models, demonstrating architectural range.
+
+| Solution | Cost/month | Scalability | Ops Complexity |
+|----------|-----------|-------------|----------------|
+| S3 + CloudFront | ~$1–15 | Infinite | Low |
+| EC2 + ALB | ~$25–45 | Manual/ASG | Medium |
+
+---
+
+## 🔐 Security Highlights
+
+- **GitHub Actions OIDC federation** — short-lived tokens, no stored access keys
+- **IMDSv2 enforced** on EC2 — mitigates SSRF credential theft
+- **SSM Session Manager** — management access without SSH or port 22
+- **CloudFront OAC** — S3 access pinned to a specific distribution ARN
+- **TLS 1.2+ / TLS 1.3** enforced on both CloudFront and ALB
+- **Private subnets** for EC2 — no direct internet exposure
+- **Separate AWS accounts** — blast radius containment between dev and prod
+
+> [!IMPORTANT]
+> GitHub OIDC federation removes the need for long-lived AWS access keys in CI/CD.
+
+---
+
+## 🔄 Remote State
+
+Terraform remote state is stored in S3 with DynamoDB locking per environment:
+
+- **Backend**: S3 bucket with AES-256 encryption and versioning enabled
+- **Locking**: DynamoDB table (`PAY_PER_REQUEST`) prevents concurrent apply conflicts
+- **Isolation**: Separate state files per environment (`dev/solution-a`, `prod/solution-b`, etc.)
+
+---
+
+## 🚀 Quick Start
 
 ### 1 — Bootstrap (run once per account)
 
@@ -34,46 +106,42 @@ Production-grade AWS website hosting — two architectures, two accounts, automa
 
 ### 2 — Add GitHub Secrets
 
-Go to **GitHub → Settings → Secrets → Actions** and add:
+Go to **Settings → Secrets → Actions** and add:
 
-| Secret | Value (from bootstrap output) |
-|--------|-------------------------------|
-| `AWS_ROLE_ARN_DEV` | ARN from dev bootstrap |
-| `AWS_ROLE_ARN_PROD` | ARN from prod bootstrap |
+| Secret | Value |
+|--------|-------|
+| `AWS_ROLE_ARN_DEV` | IAM role ARN from dev bootstrap output |
+| `AWS_ROLE_ARN_PROD` | IAM role ARN from prod bootstrap output |
 
-### 3 — Deploy Solution A (dev)
+### 3 — Deploy
 
 ```powershell
+# Solution A — dev
 cd environments/dev/solution-a
-terraform init
-terraform plan -out=tfplan
-terraform apply tfplan
-```
+terraform init && terraform apply
 
-### 4 — Deploy Solution B (dev)
-
-```powershell
+# Solution B — dev
 cd environments/dev/solution-b
-terraform init
-terraform plan -out=tfplan
-terraform apply tfplan
+terraform init && terraform apply
 ```
 
-## Repository Structure
+---
+
+## 📁 Repository Structure
 
 ```
 quanta-aws-hosting/
 ├── .github/workflows/
-│   ├── terraform-ci.yml          # PR validation
-│   ├── deploy-solution-a.yml     # S3+CloudFront deploy
-│   └── deploy-solution-b.yml     # EC2+Nginx deploy
-├── bootstrap/                    # Run once per account
+│   ├── terraform-ci.yml          # PR validation — fmt, validate, plan
+│   ├── deploy-solution-a.yml     # S3 + CloudFront deployment
+│   └── deploy-solution-b.yml     # EC2 + Nginx deployment
+├── bootstrap/                    # Remote state + OIDC setup (run once)
 ├── modules/
-│   ├── s3-cloudfront/
-│   ├── ec2-nginx/
-│   ├── acm/
-│   ├── route53/
-│   └── vpc/
+│   ├── s3-cloudfront/            # CloudFront distribution + S3 + OAC
+│   ├── ec2-nginx/                # EC2 + ALB + security groups
+│   ├── acm/                      # ACM certificate + DNS validation
+│   ├── route53/                  # ALIAS DNS records
+│   └── vpc/                      # VPC + public/private subnets + NAT
 ├── environments/
 │   ├── dev/
 │   │   ├── solution-a/           # quantadev.dev
@@ -84,21 +152,34 @@ quanta-aws-hosting/
 ├── website/
 │   ├── solution-a/               # Static site content
 │   └── solution-b/               # Nginx site content
-└── scripts/
-    ├── bootstrap.ps1
-    └── deploy.ps1
+├── scripts/
+│   ├── bootstrap.ps1
+│   └── deploy.ps1
+└── docs/
+    ├── Architecture.md
+    ├── Deployment.md
+    ├── Security.md
+    └── Troubleshooting.md
 ```
 
-## CI/CD Flow
+---
+
+## 🔁 CI/CD Flow
 
 ```
-feature/* → PR → develop   →  deploy to dev  (automatic)
-develop   → PR → main      →  deploy to prod (manual approval)
+feature/* → PR → develop   →  deploy to dev   (automatic)
+develop   → PR → main      →  deploy to prod  (manual approval gate)
 ```
 
-## Docs
+Pull requests trigger `terraform fmt`, `validate`, and `plan` automatically. Plans are posted as PR comments.
 
-- [Architecture](docs/Architecture.md)
-- [Deployment](docs/Deployment.md)
-- [Security](docs/Security.md)
-- [Troubleshooting](docs/Troubleshooting.md)
+---
+
+## 📖 Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Architecture.md](docs/Architecture.md) | Architecture evaluation, decisions, and diagrams |
+| [Deployment.md](docs/Deployment.md) | Step-by-step deployment, rollback, and CI/CD guide |
+| [Security.md](docs/Security.md) | Security controls, IAM strategy, and threat model |
+| [Troubleshooting.md](docs/Troubleshooting.md) | Common issues and operational debugging workflows |
