@@ -17,7 +17,7 @@ $ProfileMap = @{
     "prod" = "quanta-web-prod"
 }
 $AccountMap = @{
-    "dev"  = "858371255598"
+    "dev"  = "239732221791"
     "prod" = "390951754623"
 }
 
