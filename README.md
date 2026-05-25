@@ -92,6 +92,22 @@ Terraform remote state is stored in S3 with DynamoDB locking per environment:
 
 ---
 
+## 📸 Live Deployments
+
+### Solution B — EC2 + Nginx + ALB (prod) — `https://ec2.quantaweb.dev`
+
+![ec2.quantaweb.dev](docs/images/ec2_quantaweb_dev.png)
+
+### Solution B — EC2 + Nginx + ALB (dev) — `https://ec2.quantadev.dev`
+
+![ec2.quantadev.dev](docs/images/ec2_quantadev_dev.png)
+
+### CI/CD Pipeline — GitHub Actions
+
+![GitHub Actions](docs/images/GitHubActions.png)
+
+---
+
 ## 🚀 Quick Start
 
 ### 1 — Bootstrap (run once per account)
